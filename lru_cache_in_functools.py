@@ -4,7 +4,7 @@
 
 ## LRU的实现用 循环双向链表与字典 字典用来保存链表结点
 ## 链表结点内包含函数执行的返回值（缓存内容）
-## 字典的键是函数调用时传入实参列表整体（这里实参列表指所有实参的集合）的哈希值
+## 字典的键是函数调用时传入实参表（实参表指所有实参的集合）的哈希值
 ## 不同的实参传入形式 由于哈希不同会当作不同的调用 然后存入返回值到缓存
 
 
@@ -12,7 +12,7 @@
 _CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "maxsize", "currsize"])
 
 
-## 为函数实参列表计算哈希值
+## 为函数实参表计算哈希值
 ## 此类继承自list 原因暂时未知 可能是其他地方需要用到
 ## _HashedSeq类相当于构造了一个可以进行哈希的列表
 class _HashedSeq(list):
@@ -37,7 +37,7 @@ class _HashedSeq(list):
 
 
 ## 生成key
-## 使用被lru_cache装饰的函数（下面简称被装饰函数）的实参列表生成一个唯一的哈希值
+## 使用被lru_cache装饰的函数的实参表生成一个唯一的哈希值
 def _make_key(args, kwds, typed,
               kwd_mark=(object(),),
               fasttypes={int, str, frozenset, type(None)},
@@ -53,9 +53,9 @@ def _make_key(args, kwds, typed,
 
     """
 
-    ## 将实参列表合并到一个元组里 如果实参为 (1, 2, a=2, b=3)
+    ## 将实参表合并到一个元组里 如果实参为 (1, 2, a=2, b=3)
     ## 实参打包后形式为 (1,2),{'a':2, 'b':3}
-    ## 结果像这样 (1, 2, object(), 'a', 2, 'b', 3)
+    ## 结果为 (1, 2, object(), 'a', 2, 'b', 3)
     key = args
     if kwds:
         key += kwd_mark
@@ -63,7 +63,7 @@ def _make_key(args, kwds, typed,
             key += item
     
     ## 区分实参类型的情况
-    ## 结果像这样 (1, 2, object(), 'a', 2, 'b', 3, int, int, int, int)
+    ## 结果为 (1, 2, object(), 'a', 2, 'b', 3, int, int, int, int)
     ## 显然与上面不区分实参类型的情况 两者的哈希值不一样
     if typed:
         key += tuple(type(v) for v in args)
@@ -130,7 +130,8 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
     sentinel = object()          # unique object used to signal cache misses
     make_key = _make_key         # build a key from the function arguments
 
-    ## 链表节点元素 节点就是一个列表
+    ## 链表节点元素 节点就是一个4元素列表
+    ## PREV指向前一个结点 NEXT指向后一个结点 KEY为此结点被装饰函数实参表 RESULT为被装饰函数调用返回结果
     PREV, NEXT, KEY, RESULT = 0, 1, 2, 3   # names for the link fields
 
     ## 缓存用字典实现
@@ -146,6 +147,8 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
 
     ## 锁 线程锁？
     lock = RLock()           # because linkedlist updates aren't threadsafe
+
+    ## 根节点
     root = []                # root of the circular doubly linked list
 
     ## 循环双向链表 根节点一开始指向自己
@@ -189,12 +192,28 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
         def wrapper(*args, **kwds):
             # Size limited caching that tracks accesses by recency
             nonlocal root, hits, misses, full
+
+            ## 生成key
             key = make_key(args, kwds, typed)
             with lock:
+
+                ## 获取结点 即字典的值
                 link = cache_get(key)
+
+                ## 如果结点已存在 表示命中一次
                 if link is not None:
                     # Move the link to the front of the circular queue
+
+                    ## _key不需要用到
                     link_prev, link_next, _key, result = link
+
+                    ## 命中的结点放到root结点的前面 放到其他所有结点的后面 相应的hits变量+1
+                    ## 典型的缓存循环双向链表像这样 link4<=>link3<=>link2<=>link1<=>root (<=>表示这是双向链表)
+                    ## 且 root<=>link4 即root结点指向最开头结点link4 link4也指向root结点 这样就形成循环
+                    ## 一开始link1~link4命中都是0 假如命中结点是link3 那么link3会放到root前面 形成如下链表：
+                    ## link4<=>link2<=>link1<=>link3<=>root
+                    ## 这样hits递增1时 表示link3结点命中一次
+                    ## 后面如果缓存满 会先清除链表最开头的结点link4
                     link_prev[NEXT] = link_next
                     link_next[PREV] = link_prev
                     last = root[PREV]
@@ -213,6 +232,8 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
                     pass
                 elif full:
                     # Use the old root to store the new key and result.
+
+                    ## 如果缓存满，征用root结点存储新调用的实参表key和新调用的返回结果result
                     oldroot = root
                     oldroot[KEY] = key
                     oldroot[RESULT] = result
@@ -222,23 +243,37 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
                     # update. That will prevent potentially arbitrary object
                     # clean-up code (i.e. __del__) from running while we're
                     # still adjusting the links.
+
+                    ## 将原来链表 link4<=>link3<=>link2<=>link1<=>root 的link4结点作为新的root结点
+                    ## 对于上面的链表 离root最近的结点使用次数最多 离root远的结点使用次数依次减少
+                    ## 因此link4是最近最少使用的结点
+                    ## 下面的代码将link4结点从链表中删除了 即所谓的最近最少使用的结点被删除
                     root = oldroot[NEXT]
                     oldkey = root[KEY]
                     oldresult = root[RESULT]
                     root[KEY] = root[RESULT] = None
                     # Now update the cache dictionary.
+
+                    ## 最近最少使用的结点从字典里删除 但是该结点还有root记住它 它变成了新的root结点
                     del cache[oldkey]
                     # Save the potentially reentrant cache[key] assignment
                     # for last, after the root and links have been put in
                     # a consistent state.
+
+                    ## 然后用旧root结点存放新调用的key和result
                     cache[key] = oldroot
                 else:
                     # Put result in a new link at the front of the queue.
+
+                    ## 如果链表没有满 即缓存没有满 每次都把新产生结点放到链表前
+                    ## 即每次都插入到root结点前 其他所有结点后
                     last = root[PREV]
                     link = [last, root, key, result]
                     last[NEXT] = root[PREV] = cache[key] = link
                     # Use the cache_len bound method instead of the len() function
                     # which could potentially be wrapped in an lru_cache itself.
+
+                    ## 加入新结点后 需要判断是否缓存满
                     full = (cache_len() >= maxsize)
                 misses += 1
             return result
@@ -252,7 +287,7 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
         """Clear the cache and cache statistics"""
         nonlocal hits, misses, full
         with lock:
-            ## 清空字典操作
+            ## 清空字典
             cache.clear()
             ## 根节点重置
             root[:] = [root, root, None, None]
