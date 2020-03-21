@@ -8,7 +8,7 @@
 ## 不同的实参传入形式 由于哈希不同会当作不同的调用 然后存入返回值到缓存
 
 
-## 缓存状态信息存储 为命名元组
+## 缓存状态信息保存 为命名元组
 _CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "maxsize", "currsize"])
 
 
@@ -55,7 +55,7 @@ def _make_key(args, kwds, typed,
 
     ## 将实参表合并到一个元组里 如果实参为 (1, 2, a=2, b=3)
     ## 实参打包后形式为 (1,2),{'a':2, 'b':3}
-    ## 结果为 (1, 2, object(), 'a', 2, 'b', 3)
+    ## 合并后结果为 (1, 2, object(), 'a', 2, 'b', 3)
     key = args
     if kwds:
         key += kwd_mark
@@ -130,8 +130,10 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
     sentinel = object()          # unique object used to signal cache misses
     make_key = _make_key         # build a key from the function arguments
 
-    ## 链表节点元素 节点就是一个4元素列表
-    ## PREV指向前一个结点 NEXT指向后一个结点 KEY为此结点被装饰函数实参表 RESULT为被装饰函数调用返回结果
+    ## 链表结点元素 结点就是一个4元素列表
+    ## PREV指向前一个结点 NEXT指向后一个结点 
+    ## KEY为此结点被装饰函数实参表（是列表） 
+    ## RESULT为被装饰函数调用的返回结果
     PREV, NEXT, KEY, RESULT = 0, 1, 2, 3   # names for the link fields
 
     ## 缓存用字典实现
@@ -148,10 +150,10 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
     ## 锁 线程锁？
     lock = RLock()           # because linkedlist updates aren't threadsafe
 
-    ## 根节点
+    ## 根结点
     root = []                # root of the circular doubly linked list
 
-    ## 循环双向链表 根节点一开始指向自己
+    ## 循环双向链表 根结点一开始指向自己
     root[:] = [root, root, None, None]     # initialize by pointing to self
 
     ## 不缓存 函数调用后 只是简单的更新lru缓存的misses值
@@ -197,7 +199,7 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
             key = make_key(args, kwds, typed)
             with lock:
 
-                ## 获取结点 即字典的值
+                ## 获取一个结点 即字典的值
                 link = cache_get(key)
 
                 ## 如果结点已存在 表示命中一次
@@ -208,12 +210,12 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
                     link_prev, link_next, _key, result = link
 
                     ## 命中的结点放到root结点的前面 放到其他所有结点的后面 相应的hits变量+1
-                    ## 典型的缓存循环双向链表像这样 link4<=>link3<=>link2<=>link1<=>root (<=>表示这是双向链表)
-                    ## 且 root<=>link4 即root结点指向最开头结点link4 link4也指向root结点 这样就形成循环
+                    ## 典型的缓存循环双向链表像这样 link4<=>link3<=>link2<=>link1<=>root，root<=>link4 (<=>表示这是双向链表)
+                    ## root结点指向最开头结点link4 link4也指向root结点 这样就形成循环
                     ## 一开始link1~link4命中都是0 假如命中结点是link3 那么link3会放到root前面 形成如下链表：
                     ## link4<=>link2<=>link1<=>link3<=>root
                     ## 这样hits递增1时 表示link3结点命中一次
-                    ## 后面如果缓存满 会先清除链表最开头的结点link4
+                    ## 后面如果缓存满 先清除root的PREV结点最远的结点link4
                     link_prev[NEXT] = link_next
                     link_next[PREV] = link_prev
                     last = root[PREV]
@@ -233,7 +235,7 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
                 elif full:
                     # Use the old root to store the new key and result.
 
-                    ## 如果缓存满，征用root结点存储新调用的实参表key和新调用的返回结果result
+                    ## 如果缓存满，使用root结点存储新调用的实参表key和新调用的返回结果result
                     oldroot = root
                     oldroot[KEY] = key
                     oldroot[RESULT] = result
@@ -245,9 +247,8 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
                     # still adjusting the links.
 
                     ## 将原来链表 link4<=>link3<=>link2<=>link1<=>root 的link4结点作为新的root结点
-                    ## 对于上面的链表 离root最近的结点使用次数最多 离root远的结点使用次数依次减少
-                    ## 因此link4是最近最少使用的结点
-                    ## 下面的代码将link4结点从链表中删除了 即所谓的最近最少使用的结点被删除
+                    ## 对于上面的链表 离root最近的结点（link1）使用次数最多 离root远的结点（link4）使用次数依次减少
+                    ## 下面的代码将link4结点从链表中删除 即所谓的最近最少使用的结点被删除
                     root = oldroot[NEXT]
                     oldkey = root[KEY]
                     oldresult = root[RESULT]
@@ -261,19 +262,20 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
                     # a consistent state.
 
                     ## 然后用旧root结点存放新调用的key和result
+                    ## 这时此结点也是离新root结点最远的结点 一开始此结点的命中为0
                     cache[key] = oldroot
                 else:
                     # Put result in a new link at the front of the queue.
 
                     ## 如果链表没有满 即缓存没有满 每次都把新产生结点放到链表前
-                    ## 即每次都插入到root结点前 其他所有结点后
+                    ## 即每次都插入到root结点前 其他所有结点后面
                     last = root[PREV]
                     link = [last, root, key, result]
                     last[NEXT] = root[PREV] = cache[key] = link
                     # Use the cache_len bound method instead of the len() function
                     # which could potentially be wrapped in an lru_cache itself.
 
-                    ## 加入新结点后 需要判断是否缓存满
+                    ## 加入新结点后 判断是否缓存满
                     full = (cache_len() >= maxsize)
                 misses += 1
             return result
@@ -289,7 +291,7 @@ def _lru_cache_wrapper(user_function, maxsize, typed, _CacheInfo):
         with lock:
             ## 清空字典
             cache.clear()
-            ## 根节点重置
+            ## 根结点重置为指向自己
             root[:] = [root, root, None, None]
             hits = misses = 0
             full = False
