@@ -1,3 +1,6 @@
 # ignore .idea/
 .idea/
 __pycache__/
+
+# ignore macos files
+.DS_Store
